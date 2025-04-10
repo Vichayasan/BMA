@@ -33,7 +33,7 @@
 #include "lv3.h"
 #include "lv4.h"
 #include "lv5.h"
-#include "lv6.h"
+// #include "lv6.h"
 #include "NBIOT.h"
 #include "wifilogo.h"
 #include "Logo4g.h"
@@ -52,9 +52,12 @@ struct tm timeinfo;
 
 #define ProjectName " "
 // #define FirmwareVersion "0.0.6"
-String current_version = "0.0.6";
+String current_version = "0.0.15";
 
 const char *passAP = "greenio7650";
+
+#define pingCount 5 // Error time count 5 to reset
+unsigned int CountPing = 0;
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
@@ -87,6 +90,8 @@ void enterCommuCallback(Control *sender, int type);
 void enterRSTCallback(Control *sender, int type);
 void writeEEPROM();
 int32_t getWiFiChannel(const char *ssid);
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len);
+void sendStatus();
 
 void t1CallGetProbe();
 void t2CallShowEnv();
@@ -99,7 +104,8 @@ void PowerOFF_PMS7003();
 void PowerON_PMS7003();
 
 int periodSendTelemetry = 60; // the value is a number of seconds
-int espnowSend = 0;
+int periodOTA = 300;
+int espnowSend = 10;
 
 int rd = 0;
 /*
@@ -153,8 +159,8 @@ const char serverOTA[] = "raw.githubusercontent.com";
 const int port = 443;
 
 String new_version;
-const char version_url[] = ""; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
-const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/prakit340/GreenIO-OTA/main/ota/product/qualcomm/airmass25/version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
+const char version_url[] = "/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
+const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
 
 String firmware_url;
 
@@ -197,7 +203,7 @@ String hostUI = "";
 #define title2 "PM1"
 #define title3 "PM10"
 #define title4 "CO2"
-#define title5 "VOC"
+#define title5 "TVOC"
 #define title6 "Update"
 #define title7 "ug/m3"
 #define title8 "HUMI: "
@@ -250,7 +256,7 @@ String widget = "";
 uint16_t wifi_ssid_text, wifi_pass_text, rec;
 uint16_t nameLabel, idLabel, cuationlabel, firmwarelabel, mainSwitcher, mainSlider, mainText, settingZNumber, resultButton, mainTime, downloadButton, selectDownload, logStatus;
 //  uint16_t styleButton, styleLabel, styleSwitcher, styleSlider, styleButton2, styleLabel2, styleSlider2;
-uint16_t tempText, humText, humText2, saveConfigButton, interval, emailText1, t_NOW;
+uint16_t tempText, humText, humText2, saveConfigButton, interval, emailText1, t_NOW, t_OTA;
 uint16_t pm01Text, pm25Text, pm10Text, pn03Text, pn05Text, pn10Text, pn25Text, pn50Text, pn100Text, lineText, eCO2Text, TVOCText;
 uint16_t bmeLog, wifiLog, teleLog;
 
@@ -294,7 +300,7 @@ extern struct tcp_pcb* tcp_tw_pcbs;
 extern "C" void tcp_abort(struct tcp_pcb* pcb);
 
 void tcpCleanup(void) {
-  // Serial.println("Debug TCPclean()");
+  Serial.println("Debug TCPclean()");
     while (tcp_tw_pcbs) {
         tcp_abort(tcp_tw_pcbs);
     }
@@ -302,6 +308,7 @@ void tcpCleanup(void) {
 
 uint32_t getAbsoluteHumidity(float temperature, float humidity)
 {
+  Serial.println("getAbsoluteHumidity Debug 1");
   // approximation formula from Sensirion SGP30 Driver Integration chapter 3.15
   const float absoluteHumidity = 216.7f * ((humidity / 100.0f) * 6.112f * exp((17.62f * temperature) / (243.12f + temperature)) / (273.15f + temperature)); // [g/m^3]
   const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity);                                                                // [mg/m^3]
@@ -328,8 +335,18 @@ typedef struct pms7003data
 pms7003data data;
 pms7003data ui;
 
+typedef struct SWStat
+{
+  
+  uint16_t Stat[3] = {};
+}SWStat;
+
+SWStat swst;
+String Fanlabel[3] = {"FreshState", "F1Stat", "F2Stat"};
+
 void splash()
 {
+  Serial.println("splash Debug 1");
   int xpos = 0;
   int ypos = 0;
 
@@ -348,7 +365,7 @@ void splash()
   tft.setFreeFont(FSB9);
   xpos = tft.width() / 2; // Half the screen width
   ypos = 190;
-  String namePro = ProjectName;
+  String namePro = "AIRMASS 2.5 Inspector";
   tft.drawString(namePro, xpos, ypos, GFXFF); // Draw the text string in the selected GFX free font
   //  tft.drawString("", xpos, ypos + 20, GFXFF); // Draw the text string in the selected GFX free font
   //  AISnb.debug = true;
@@ -402,6 +419,7 @@ void splash()
 
 void _initLCD()
 {
+  Serial.println("_initLCD Debug 1");
   tft.fillScreen(TFT_BLACK);
   // TFT
   splash();
@@ -409,6 +427,7 @@ void _initLCD()
 
 void configModeCallback(WiFiManager *myWiFiManager)
 {
+  Serial.println("configModeCallback Debug 1");
   Serial.println("Entered config mode");
   Serial.println(WiFi.softAPIP());
   // if you used auto generated SSID, print it
@@ -417,6 +436,7 @@ void configModeCallback(WiFiManager *myWiFiManager)
 
 void _initBME280()
 {
+  Serial.println("_initBME280 Debug 1");
   BMEstatus = bme.begin(0x76);
 
   if (!BMEstatus)
@@ -433,6 +453,7 @@ void _initBME280()
 
 void calibrateSGP30()
 {
+  Serial.println("calibrateSGP30 Debug 1");
   uint16_t readTvoc = 0;
   uint16_t readCo2 = 0;
   Serial.println("Done Calibrate");
@@ -449,6 +470,7 @@ void calibrateSGP30()
 
 void _initSGP30()
 {
+  Serial.println("_initSGP30 Debug 1");
   SGPstatus = sgp.begin();
   if (!SGPstatus)
   {
@@ -464,6 +486,7 @@ void _initSGP30()
 
 void printBME280Data()
 {
+  Serial.println("printBME280Data Debug 1");
   Serial.println("----- Read BME280 ------");
   data.temp = bme.readTemperature() + (TempOffset); // compensate
   data.hum = bme.readHumidity() + (HumOffset1);
@@ -487,7 +510,7 @@ void printBME280Data()
 void _initUI(){
   Serial.println("Starting _initUI...");
 
-  hostUI = "BMA-TX" + deviceToken;
+  hostUI = "BMA-TX-" + deviceToken;
 
   // if (WiFi.status() == WL_CONNECTED) {
   //     Serial.println("WiFi is connected!");
@@ -503,8 +526,13 @@ void _initUI(){
       Serial.println("\nCreating Access Point...");
       Serial.print("WiFi Mode: ");
       Serial.println(WiFi.getMode()); // Should be 2 (WIFI_AP) when running this
-
-      WiFi.mode(WIFI_STA); // Should be in STA mode
+      
+      if(connectWifi){
+        WiFi.mode(WIFI_AP_STA); // Should be in STA mode
+      }else{
+        WiFi.mode(WIFI_STA);
+      }
+      
       WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
 
       if (WiFi.softAP(hostUI.c_str())) {
@@ -525,7 +553,7 @@ void _initUI(){
 
 void setUpUI()
 {
-
+  Serial.println("setUpUI Debug 1");
   tcpCleanup();
   // Turn off verbose  ging
   ESPUI.setVerbosity(Verbosity::Quiet);
@@ -546,7 +574,7 @@ void setUpUI()
   auto maintab = ESPUI.addControl(Tab, "", "Home");
   nameLabel = ESPUI.addControl(Label, "Device Name", "BMA", Emerald, maintab);
   idLabel = ESPUI.addControl(Label, "Device ID", String(deviceToken), Emerald, maintab);
-  firmwarelabel = ESPUI.addControl(Label, "Firmware", "0.0.0", Emerald, maintab);
+  firmwarelabel = ESPUI.addControl(Label, "Firmware", String(current_version), Emerald, maintab);
 
   auto now = ESPUI.addControl(Tab, "", "ESP-NOW");
   rec = ESPUI.addControl(Text, "Mac Receiver:", String(macStr), Emerald, now, enterCommuCallback);
@@ -573,7 +601,8 @@ void setUpUI()
   TVOCText = ESPUI.addControl(Number, "Volatile organic Compounds", String(TVOCOffset), Emerald, settingTab, enterDetailsCallback);
 
   ESPUI.addControl(Separator, "Interval Configuration", "", None, settingTab);
-  interval = ESPUI.addControl(Number, "Interval (second)", String(periodSendTelemetry), Emerald, settingTab, enterDetailsCallback);
+  interval = ESPUI.addControl(Number, "Telemetry Interval (second)", String(periodSendTelemetry), Emerald, settingTab, enterDetailsCallback);
+  t_OTA = ESPUI.addControl(Number, "OTA InterVal (second)", String(periodOTA), Emerald, settingTab, enterDetailsCallback);
 
   ESPUI.addControl(Separator, "", "", None, settingTab);
   //  ESPUI.addControl(Button, "Refresh", "Refresh", Peterriver, settingTab, enterDetailsCallback);
@@ -605,6 +634,7 @@ void setUpUI()
 
 void enterDetailsCallback(Control *sender, int type)
 {
+  Serial.println("enterDetailsCallback Debug 1");
   Serial.println(sender->value);
   ESPUI.updateControl(sender);
 
@@ -645,6 +675,7 @@ void enterDetailsCallback(Control *sender, int type)
     eCO2Offset = eCO2Offset_->value.toInt();
     TVOCOffset = TVOCOffset_->value.toInt();
     periodSendTelemetry = periodSendTelemetry_->value.toInt();
+    periodOTA = ESPUI.getControl(t_OTA)->value.toInt();
     // email1 = email1_->value;
     // lineID = lineID_->value;
     // email1.toCharArray(data1, 40); // Convert String to char array
@@ -666,6 +697,7 @@ void enterDetailsCallback(Control *sender, int type)
 
 void enterCommuCallback(Control *sender, int type)
 {
+  Serial.println("enterCommuCallback Debug 1");
   Serial.println(sender->value);
   ESPUI.updateControl(sender);
 
@@ -682,11 +714,12 @@ void enterCommuCallback(Control *sender, int type)
     // ESP.restart();
     // strncpy(WIFI_SSID, _ssid->value.c_str(), SSID_MAX_LEN - 1);
     // WIFI_SSID[SSID_MAX_LEN - 1] = '\0';  // Ensure null termination
-
+    sendAttribute();
   }
 }
 
 void enterRSTCallback(Control *sender, int type){
+  Serial.println("debug 2");
   Serial.println(sender->value);
   // ESPUI.updateControl(sender);
   Control* _rst = ESPUI.getControl(ui.resWiFi);
@@ -716,6 +749,7 @@ void enterRSTCallback(Control *sender, int type){
 // }
 
 String hexToString(uint8_t* hexArray, size_t size) {
+  Serial.println("debug 3");
   String result = "";
   for (size_t i = 0; i < size; i++) {
     if (hexArray[i] < 0x10) result += "0";
@@ -725,6 +759,7 @@ String hexToString(uint8_t* hexArray, size_t size) {
 }
 
 void writeEEPROM(){
+  Serial.println("debug 4");
   char data1[40];
   char data2[40];
   char data3[40];
@@ -766,6 +801,8 @@ void writeEEPROM(){
   addr += sizeof(TVOCOffset);
   EEPROM.put(addr, periodSendTelemetry);
   addr += sizeof(periodSendTelemetry);
+  EEPROM.put(addr, periodOTA);
+  addr += sizeof(periodOTA);
   EEPROM.put(addr, espnowSend);
   addr += sizeof(espnowSend);
   EEPROM.put(addr, data.id);
@@ -793,6 +830,7 @@ void writeEEPROM(){
 
 void readEEPROM()
 {
+  Serial.println("debug 5");
   Serial.println("Reading credentials from EEPROM...");
   EEPROM.begin(512); // Ensure enough size for data
 
@@ -825,6 +863,8 @@ void readEEPROM()
   addr += sizeof(TVOCOffset);
   EEPROM.get(addr, periodSendTelemetry);
   addr += sizeof(periodSendTelemetry);
+  EEPROM.get(addr, periodOTA);
+  addr += sizeof(periodOTA);
   EEPROM.get(addr, espnowSend);
   addr += sizeof(espnowSend);
   EEPROM.get(addr, data.id);
@@ -868,6 +908,7 @@ void readEEPROM()
   ESPUI.updateNumber(tempText, TempOffset);
   ESPUI.updateNumber(humText, HumOffset1);
   ESPUI.updateNumber(interval, periodSendTelemetry);
+  ESPUI.updateNumber(t_OTA, periodOTA);
   ESPUI.updateNumber(pm01Text, pm01Offset);
   ESPUI.updateNumber(pm25Text, pm25Offset);
   ESPUI.updateNumber(pm10Text, pm10Offset);
@@ -892,15 +933,22 @@ void readEEPROM()
 
 void processAtt(char jsonAtt[])
 {
+  Serial.println("processAtt Debug 1");
   char *aString = jsonAtt;
   Serial.println("OK");
   Serial.print(F("+:topic v1/devices/me/attributes , "));
   Serial.println(aString);
-  client.publish("v1/devices/me/attributes", aString);
+  if (connectWifi){
+    client.publish("v1/devices/me/attributes", aString);
+  }else{
+    GSMmqtt.publish("v1/devices/me/attributes", aString);
+  }
+  
 }
 
 boolean reconnectWiFiMqtt()
 {
+  Serial.println("reconnectWiFiMqtt Debug 1");
 
   SerialMon.print("Connecting to ");
   SerialMon.print(thingsboardServer);
@@ -947,9 +995,12 @@ boolean reconnectGSMMqtt()
 
 void sendAttribute()
 {
+  Serial.println("debug 6");
   String json = "";
-  json.concat("{\"email1\":\"");
-  json.concat(String(email1));
+  json.concat("{\"ReceiveMac\":\"");
+  json.concat(macStr);
+  json.concat("\",\"id\":");
+  json.concat(data.id);
   json.concat("\"}");
   Serial.println(json);
 
@@ -1028,6 +1079,7 @@ void getDataSGP30()
 
 void writeAQI(String title, int x, int y, int size)
 {
+  Serial.println("debug 7");
   // Create a sprite 80 pixels wide, 50 high (8kbytes of RAM needed)
   stringAQI.createSprite(230, 75);
   //  stringPM25.fillSprite(TFT_YELLOW);
@@ -1054,6 +1106,7 @@ void writeAQI(String title, int x, int y, int size)
 
 void drawPM2_5(int num, int x, int y)
 {
+  Serial.println("debug 8");
   // Create a sprite 80 pixels wide, 50 high (8kbytes of RAM needed)
   stringPM25.createSprite(230, 75);
   //  stringPM25.fillSprite(TFT_YELLOW);
@@ -1079,6 +1132,7 @@ void drawPM2_5(int num, int x, int y)
 
 void drawT(float num, int x, int y)
 {
+  Serial.println("debug 9");
   T.createSprite(40, 20);
   T.fillSprite(TFT_BLACK);
   T.setFreeFont(FSB9);
@@ -1093,6 +1147,7 @@ void drawT(float num, int x, int y)
 
 void drawH(float num, int x, int y)
 {
+  Serial.println("debug 10");
   H.createSprite(40, 20);
   //  stringPM1.fillSprite(TFT_GREEN);
   H.setFreeFont(FSB9);
@@ -1107,6 +1162,7 @@ void drawH(float num, int x, int y)
 
 void drawPM1(int num, int x, int y)
 {
+  Serial.println("debug 11");
   stringPM1.createSprite(60, 20);
   stringPM1.fillSprite(TFT_BLACK);
   stringPM1.setFreeFont(FSB9);
@@ -1119,6 +1175,7 @@ void drawPM1(int num, int x, int y)
 
 void drawPM10(int num, int x, int y)
 {
+  Serial.println("debug 12");
   stringPM10.createSprite(60, 20);
   //  stringPM1.fillSprite(TFT_GREEN);
   stringPM10.setFreeFont(FSB9);
@@ -1131,6 +1188,7 @@ void drawPM10(int num, int x, int y)
 
 void drawCO2(int num, int x, int y)
 {
+  Serial.println("debug 13");
   stringCO2.createSprite(60, 20);
   stringCO2.fillSprite(TFT_BLACK);
   stringCO2.setFreeFont(FSB9);
@@ -1143,6 +1201,7 @@ void drawCO2(int num, int x, int y)
 
 void drawVOC(int num, int x, int y)
 {
+  Serial.println("debug 14");
   stringVOC.createSprite(60, 20);
   //  stringVOC.fillSprite(TFT_GREEN);
   stringVOC.setFreeFont(FSB9);
@@ -1205,11 +1264,7 @@ void composeJson()
   Serial.println("----- JSON Compose -----");
   json.concat("{\"Tn\":\"");
   json.concat(deviceToken);
-  // json.concat("\",\"ReceiveMac\":\"");
-  // json.concat(macStr);
-  json.concat("\",\"id\":");
-  json.concat(data.id);
-  json.concat(",\"temp\":");
+  json.concat("\",\"temp\":");
   json.concat(data.temp);
   json.concat(",\"hum\":");
   json.concat(data.hum);
@@ -1237,11 +1292,11 @@ void composeJson()
   json.concat(data.particles_100um);
   json.concat(",\"co2\":");
   json.concat(data.eCO2);
-  json.concat(",\"voc\":");
+  json.concat(",\"TVOC\":");
   json.concat(data.TVOC);
-  json.concat(",\"project\":\"AIRMASS2.5\"");
+  // json.concat(",\"project\":\"AIRMASS2.5\"");
   json.concat(",\"v\":\"");
-  json.concat("0.0.0");
+  json.concat(current_version);
   json.concat("\"}");
   Serial.println(json);
 
@@ -1315,6 +1370,7 @@ void heartBeat()
 
 void t2CallShowEnv()
 {
+  Serial.println("debug 15");
   tft.setTextDatum(MC_DATUM);
   xpos = tft.width() / 2; // Half the screen width
 
@@ -1343,29 +1399,29 @@ void t2CallShowEnv()
   tft.setTextSize(1);
   tft.setFreeFont(FSB9); // Select Free Serif 9 point font, could use:
 
-  tft.drawString(title2, 45, 270, GFXFF); // Print the test text in the custom font
-  drawPM1(data.pm01_env , 15, 275);
+  tft.drawString(title2, 45, 279, GFXFF); // Print the test text in the custom font
+  drawPM1(data.pm01_env , 15, 280);
   tft.drawString(title7, 47, 320, GFXFF);
 
-  tft.drawString(title3, 115, 270, GFXFF); // Print the test text in the custom font
-  drawPM10(data.pm100_env , 72, 275);
+  tft.drawString(title3, 115, 279, GFXFF); // Print the test text in the custom font
+  drawPM10(data.pm100_env , 72, 280);
   tft.drawString(title7, 115, 320, GFXFF);
 
-  tft.drawString(title4, 175, 270, GFXFF); // Print the test text in the custom font
-  drawCO2(data.eCO2, 141, 275);
+  tft.drawString(title4, 175, 279, GFXFF); // Print the test text in the custom font
+  drawCO2(data.eCO2, 141, 280);
   tft.drawString(title11, 172, 320, GFXFF);
 
-  tft.drawString(title5, 255, 270, GFXFF); // Print the test text in the custom font
-  drawVOC(data.TVOC, 222, 275);
+  tft.drawString(title5, 255, 279, GFXFF); // Print the test text in the custom font
+  drawVOC(data.TVOC, 222, 280);
   tft.drawString(title10, 255, 320, GFXFF);
 
-  tft.drawString(title9, 365, 280, GFXFF); // Print the test text in the custom font
-  drawT(data.temp, 375, 260);
-  tft.drawString("°C", 435, 280, GFXFF);
+  tft.drawString(title9, 365, 282, GFXFF); // Print the test text in the custom font
+  drawT(data.temp, 375, 262);
+  tft.drawString("°C", 435, 282, GFXFF);
 
-  tft.drawString(title8, 365, 310, GFXFF); // Print the test text in the custom font
-  drawH(data.hum, 375, 290);
-  tft.drawString("%", 435, 310, GFXFF);
+  tft.drawString(title8, 365, 312, GFXFF); // Print the test text in the custom font
+  drawH(data.hum, 375, 292);
+  tft.drawString("%", 435, 312, GFXFF);
 
   // Clear Stage
 
@@ -1378,32 +1434,32 @@ void t2CallShowEnv()
   {
     //writeAQI(titleAQI1, mid, 75, 2.5);
     tft.setWindow(0, 25, 55, 55);
-    tft.pushImage(tft.width() - lv1Width - 50, 70, lv1Width, lv1Height, lv1);
-    ind.fillTriangle(7, 0, 12, 5, 17, 0, FILLCOLOR1);
+    tft.pushImage(tft.width() - lv1Width - 50, 38, lv1Width, lv1Height, lv1);
+    ind.fillTriangle(7, 0, 12, 15, 17, 0, FILLCOLOR1);
   }
   else if ((data.pm25_env >= 15.1) && (data.pm25_env <= 25.0))
   {
     //writeAQI(titleAQI2, mid, 75, 1.5);
-    tft.pushImage(tft.width() - lv2Width - 50, 70, lv2Width, lv2Height, lv2);
-    ind.fillTriangle(82, 0, 87, 5, 92, 0, FILLCOLOR1);
+    tft.pushImage(tft.width() - lv2Width - 50, 38, lv2Width, lv2Height, lv2);
+    ind.fillTriangle(82, 0, 87, 15, 92, 0, FILLCOLOR1);
   }
   else if ((data.pm25_env >= 25.1) && (data.pm25_env <= 37.5))
   {
     //writeAQI(titleAQI2, mid, 75, 1.5);
-    tft.pushImage(tft.width() - lv3Width - 50, 70, lv3Width, lv3Height, lv3);
-    ind.fillTriangle(160, 0, 165, 5, 170, 0, FILLCOLOR1);
+    tft.pushImage(tft.width() - lv3Width - 50, 38, lv3Width, lv3Height, lv3);
+    ind.fillTriangle(160, 0, 165, 15, 170, 0, FILLCOLOR1);
   }
   else if ((data.pm25_env >= 37.6) && (data.pm25_env <= 75.0))
   {
     //writeAQI(titleAQI4, mid, 75, 1.5);
-    tft.pushImage(tft.width() - lv4Width - 50, 70, lv4Width, lv4Height, lv4);
-    ind.fillTriangle(240, 0, 245, 5, 250, 0, FILLCOLOR1);
+    tft.pushImage(tft.width() - lv4Width - 50, 38, lv4Width, lv4Height, lv4);
+    ind.fillTriangle(240, 0, 245, 15, 250, 0, FILLCOLOR1);
   }
   else
   {
     //writeAQI(titleAQI5, mid, 75, 1.5);
-    tft.pushImage(tft.width() - lv5Width - 50, 70, lv5Width, lv5Height, lv5);
-    ind.fillTriangle(320, 0, 325, 5, 330, 0, FILLCOLOR1);
+    tft.pushImage(tft.width() - lv5Width - 50, 38, lv5Width, lv5Height, lv5);
+    ind.fillTriangle(320, 0, 325, 15, 330, 0, FILLCOLOR1);
   }
 
   //test AQI
@@ -1589,6 +1645,7 @@ void readPMSdata()
 
 void getMac()
 {
+  Serial.println("debug 16");
   byte mac[6];
   WiFi.macAddress(mac);
   Serial.println("OK");
@@ -1608,19 +1665,288 @@ void getMac()
 
 void PowerON_PMS7003()
 {
+  Serial.println("debug 17");
   digitalWrite(boot5VPIN, HIGH);
 }
 
 void PowerOFF_PMS7003()
 {
+  Serial.println("debug 18");
   digitalWrite(boot5VPIN, LOW);
+}
+
+void _initNOW(){
+  Serial.println("debug 19");
+
+  // Init ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Register for a callback function that will be called when data is received
+  esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
+
+  // Once ESPNow is successfully Init, we will register for Send CB to
+  // get the status of Transmitted packet
+  esp_now_register_send_cb(OnDataSent);
+
+  if (connectWifi){
+    int32_t channel = getWiFiChannel(WiFi.SSID().c_str());
+
+    WiFi.printDiag(Serial);
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+    WiFi.printDiag(Serial);
+
+  }else{
+    peerInfo.channel = 0;
+  }
+
+  // Register peer
+  memcpy(peerInfo.peer_addr, macArray, 6);
+  // peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  // Add peer
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.println("debug 20");
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+  String(data.espnowTrack) = status;
+  ESPUI.updateLabel(ui.UIespnowTrack, String(data.espnowTrack));
+}
+
+//callback function that will be executed when data is received
+void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+  Serial.println();
+  Serial.println("RX debug 1");
+  memcpy(&swst, incomingData, sizeof(swst));
+  Serial.print("Bytes received: ");
+  Serial.println(len);
+  for (int i = 0; i < 3; i++){
+    Serial.printf("Label: %s, Stat: %d \n", Fanlabel[i], swst.Stat[i]);
+  }
+
+  sendStatus();
+
+  Serial.println();
+
+  
+}
+
+void sendStatus(){
+
+  String AutoStat = "";
+  AutoStat.concat("{\"");
+  AutoStat.concat(Fanlabel[0]);
+  AutoStat.concat("\":\"");
+  AutoStat.concat(swst.Stat[0]? "ON": "OFF");
+  AutoStat.concat("\",\"");
+  AutoStat.concat(Fanlabel[1]);
+  AutoStat.concat("\":\"");
+  AutoStat.concat(swst.Stat[1]? "ON": "OFF");
+  AutoStat.concat("\",\"");
+  AutoStat.concat(Fanlabel[2]);
+  AutoStat.concat("\":\"");
+  AutoStat.concat(swst.Stat[2]? "ON": "OFF");
+  AutoStat.concat("\"}");
+
+  Serial.println();
+  Serial.println(AutoStat);
+  
+  // Length (with one extra character for the null terminator)
+  int str_len = AutoStat.length() + 1;
+  // Prepare the character array (the buffer)
+  char stat[str_len];
+  // Copy it over
+  AutoStat.toCharArray(stat, str_len);
+
+  if (connectWifi){
+    
+    client.publish("v1/devices/me/telemetry", stat);
+    // delayMicroseconds(100000);
+  }else{
+    GSMmqtt.publish("v1/devices/me/telemetry", stat);
+    // delayMicroseconds(100000);
+  }
+
+}
+
+void sendNOW(){
+  Serial.println("debug 21");
+   // Send message via ESP-NOW
+   esp_err_t result = esp_now_send(macArray, (uint8_t *) &data, sizeof(data));
+   
+   if (result == ESP_OK) {
+    String(data.messageTrack) = "Sent with success";
+    ESPUI.updateLabel(ui.UImessageTrack, String(data.messageTrack));
+     Serial.println(data.messageTrack);
+   }
+   else {
+    String(data.messageTrack) = "Error sending the data";
+    ESPUI.updateLabel(ui.UImessageTrack, String(data.messageTrack));
+    Serial.println(data.messageTrack);
+    _initNOW();
+   }
+}
+
+
+
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+
+  // Convert payload to a String
+  String jsonString;
+  for (int i = 0; i < length; i++) {
+    jsonString += (char)payload[i];
+  }
+  Serial.println(jsonString);  // Debugging: Print the received JSON
+
+  // Parse JSON
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, jsonString);
+
+  if (error) {
+    Serial.print("JSON Parsing failed: ");
+    Serial.println(error.f_str());
+    return;
+  }
+
+  // Extract "method" and "params"
+  String method = doc["method"].as<String>();
+  bool params = doc["params"].as<bool>();
+
+  Serial.print("Method: ");
+  Serial.println(method);
+  Serial.print("Params: ");
+  Serial.println(params);
+
+  if (method.toInt() == 0){
+    widget = "";
+    data.pmSet = doc["params"]["pmSetPoint"].as<int>();
+    data.co2Set = doc["params"]["co2SetPoint"].as<int>();
+    data.mode = "Automatic Mode";
+    data.sendMode = method.toInt();
+    data.sendPM = doc["params"]["pmSetPoint"].as<int>();
+    data.sendCO2 = doc["params"]["co2SetPoint"].as<int>();
+
+    ESPUI.removeControl(ui.FAsw);
+    ESPUI.removeControl(ui.Fsw1);
+    ESPUI.removeControl(ui.Fsw2);
+    ESPUI.removeControl(ui.pmSet);
+    ESPUI.removeControl(ui.co2Set);
+
+    ESPUI.updateLabel(ui.UImode, String(data.mode));
+    ui.pmSet = ESPUI.addControl(Label, "PM 2.5 Set Point", String(data.pmSet), Alizarin, ui.eventTab);
+    ui.co2Set = ESPUI.addControl(Label, "CO2 Set Point", String(data.co2Set), Alizarin, ui.eventTab);
+    
+    widget.concat("{\"Mode\":");
+    widget.concat(method);
+    widget.concat(",\"PM25SetPoint\":");
+    widget.concat(data.pmSet);
+    widget.concat(",\"CO2SetPoint\":");
+    widget.concat(data.co2Set);
+    widget.concat("}");
+    Serial.println(widget);
+
+  }else if (method.toInt() == 1)
+  {
+    widget = "";
+    data.mode = "Manual Mode";
+    data.fresh = doc["params"]["Fresh Air"].as<bool>()? "ON": "OFF";
+    data.f1 = doc["params"]["Fan 1"].as<bool>()? "ON": "OFF";
+    data.f2 = doc["params"]["Fan 2"].as<bool>()? "ON": "OFF";
+    data.sendMode = method.toInt();
+    data.sendFresh = doc["params"]["Fresh Air"].as<bool>()? 1: 0;
+    data.sendF1 = doc["params"]["Fan 1"].as<bool>()? 1: 0;
+    data.sendF2 = doc["params"]["Fan 2"].as<bool>()? 1: 0;
+
+    ESPUI.removeControl(ui.FAsw);
+    ESPUI.removeControl(ui.Fsw1);
+    ESPUI.removeControl(ui.Fsw2);
+    ESPUI.removeControl(ui.pmSet);
+    ESPUI.removeControl(ui.co2Set);
+
+    ESPUI.updateLabel(ui.UImode, String(data.mode));
+    ui.FAsw = ESPUI.addControl(Label, "Fresh Air", String(data.fresh), Alizarin, ui.eventTab);
+    ui.Fsw1 = ESPUI.addControl(Label, "Fan 1", String(data.f1), Alizarin, ui.eventTab);
+    ui.Fsw2 = ESPUI.addControl(Label, "Fan 2", String(data.f2), Alizarin, ui.eventTab);
+    widget.concat("{\"Mode\":");
+    widget.concat(method);
+    widget.concat(",\"FreshAirStat\":");
+    widget.concat(data.fresh);
+    widget.concat(",\"Fan1Stat\":");
+    widget.concat(data.f1);
+    widget.concat(",\"Fan2Stat\":");
+    widget.concat(data.f2);
+    widget.concat("}");
+
+    Serial.println(widget);
+    
+
+  }
+  ESPUI.updateControl(ui.UImode, -1);  // Refresh UI
+  
+  // Length (with one extra character for the null terminator)
+  int str_len = widget.length() + 1;
+  // Prepare the character array (the buffer)
+  char sw[str_len];
+  // Copy it over
+  widget.toCharArray(sw, str_len);
+
+  if (connectWifi){
+    
+    client.publish("v1/devices/me/attributes", sw);
+    // delayMicroseconds(100000);
+  }else{
+    GSMmqtt.publish("v1/devices/me/attributes", sw);
+    // delayMicroseconds(100000);
+  }
+
+  Serial.println("Call Back debug");
+
+  // esp_now_send(macArray, (uint8_t *) &sw, sizeof(sw));
+
+  // // Perform action based on method
+  // if (method == "setValue()") {
+  //   if (params) {
+  //     Serial.println("Turning ON the device!");
+  //     // Add your action here (e.g., digitalWrite to control hardware)
+  //   } else {
+  //     Serial.println("Turning OFF the device!");
+  //     // Add your action here
+  //   }
+  // }
+
+}
+
+int32_t getWiFiChannel(const char *ssid) {
+  Serial.println("debug 22");
+  if (int32_t n = WiFi.scanNetworks()) {
+      for (uint8_t i=0; i<n; i++) {
+          if (!strcmp(ssid, WiFi.SSID(i).c_str())) {
+              return WiFi.channel(i);
+          }
+      }
+  }
+  return 0;
 }
 
 bool checkForUpdate(String &firmware_url)
 {
   heartBeat();
 
-  Serial.println("Making GET request securely...");
+  Serial.println("Making GSM GET request securely...");
   GSMclient.get(version_url);
   int status_code = GSMclient.responseStatusCode();
   delay(1000);
@@ -1646,7 +1972,7 @@ bool checkForUpdate(String &firmware_url)
   if (new_version != current_version)
   {
     Serial.println("New version available. Updating...");
-    firmware_url = String("/prakit340/GreenIO-OTA/main/ota/product/qualcomm/airmass25/firmware_v") + new_version + ".bin";
+    firmware_url = String("/Vichayasan/BMA/refs/heads/main/TX/firmware") + new_version + ".bin";
     Serial.println("Firmware URL: " + firmware_url);
     return true;
   }
@@ -1664,7 +1990,7 @@ void performOTA(const char *firmware_url)
   heartBeat();
 
   // Initialize HTTP
-  Serial.println("Making GET request securely...");
+  Serial.println("Making GSM GET firmware OTA request securely...");
   GSMclient.get(firmware_url);
   int status_code = GSMclient.responseStatusCode();
   delay(1000);
@@ -1784,198 +2110,6 @@ void GSM_OTA()
   }
 }
 
-void _initNOW(){
-
-  if (connectWifi){
-    int32_t channel = getWiFiChannel(WiFi.SSID().c_str());
-
-    WiFi.printDiag(Serial);
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_promiscuous(false);
-    WiFi.printDiag(Serial);
-
-  }else{
-    peerInfo.channel = 0;
-  }
-
-  // Init ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
-  }
-  // Once ESPNow is successfully Init, we will register for Send CB to
-  // get the status of Transmitted packet
-  esp_now_register_send_cb(OnDataSent);
-  // Register peer
-  memcpy(peerInfo.peer_addr, macArray, 6);
-  // peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  // Add peer
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
-  }
-}
-
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("\r\nLast Packet Send Status:\t");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
-  String(data.espnowTrack) = status;
-  ESPUI.updateLabel(ui.UIespnowTrack, String(data.espnowTrack));
-}
-
-void sendNOW(){
-   // Send message via ESP-NOW
-   esp_err_t result = esp_now_send(macArray, (uint8_t *) &data, sizeof(data));
-   
-   if (result == ESP_OK) {
-    String(data.messageTrack) = "Sent with success";
-    ESPUI.updateLabel(ui.UImessageTrack, String(data.messageTrack));
-     Serial.println(data.messageTrack);
-   }
-   else {
-    String(data.messageTrack) = "Error sending the data";
-    ESPUI.updateLabel(ui.UImessageTrack, String(data.messageTrack));
-    Serial.println(data.messageTrack);
-    _initNOW();
-   }
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-
-  // Convert payload to a String
-  String jsonString;
-  for (int i = 0; i < length; i++) {
-    jsonString += (char)payload[i];
-  }
-  Serial.println(jsonString);  // Debugging: Print the received JSON
-
-  // Parse JSON
-  StaticJsonDocument<200> doc;
-  DeserializationError error = deserializeJson(doc, jsonString);
-
-  if (error) {
-    Serial.print("JSON Parsing failed: ");
-    Serial.println(error.f_str());
-    return;
-  }
-
-  // Extract "method" and "params"
-  String method = doc["method"].as<String>();
-  bool params = doc["params"].as<bool>();
-
-  Serial.print("Method: ");
-  Serial.println(method);
-  Serial.print("Params: ");
-  Serial.println(params);
-
-  if (method.toInt() == 0){
-    widget = "";
-    data.pmSet = doc["params"]["pmSetPoint"].as<int>();
-    data.co2Set = doc["params"]["co2SetPoint"].as<int>();
-    data.mode = "Automatic Mode";
-    data.sendMode = method.toInt();
-    data.sendPM = doc["params"]["pmSetPoint"].as<int>();
-    data.sendCO2 = doc["params"]["co2SetPoint"].as<int>();
-
-    ESPUI.removeControl(ui.FAsw);
-    ESPUI.removeControl(ui.Fsw1);
-    ESPUI.removeControl(ui.Fsw2);
-    ESPUI.removeControl(ui.pmSet);
-    ESPUI.removeControl(ui.co2Set);
-
-    ESPUI.updateLabel(ui.UImode, String(data.mode));
-    ui.pmSet = ESPUI.addControl(Label, "PM 2.5 Set Point", String(data.pmSet), Alizarin, ui.eventTab);
-    ui.co2Set = ESPUI.addControl(Label, "CO2 Set Point", String(data.co2Set), Alizarin, ui.eventTab);
-    
-    widget.concat("{\"Mode\":");
-    widget.concat(method);
-    widget.concat(",\"PM25SetPoint\":");
-    widget.concat(data.pmSet);
-    widget.concat(",\"CO2SetPoint\":");
-    widget.concat(data.co2Set);
-    widget.concat("}");
-
-  }else if (method.toInt() == 1)
-  {
-    widget = "";
-    data.mode = "Manual Mode";
-    data.fresh = doc["params"]["Fresh Air"].as<bool>()? "ON": "OFF";
-    data.f1 = doc["params"]["Fan 1"].as<bool>()? "ON": "OFF";
-    data.f2 = doc["params"]["Fan 2"].as<bool>()? "ON": "OFF";
-    data.sendMode = method.toInt();
-    data.sendFresh = doc["params"]["Fresh Air"].as<bool>()? 1: 0;
-    data.sendF1 = doc["params"]["Fan 1"].as<bool>()? 1: 0;
-    data.sendF2 = doc["params"]["Fan 2"].as<bool>()? 1: 0;
-
-    ESPUI.removeControl(ui.FAsw);
-    ESPUI.removeControl(ui.Fsw1);
-    ESPUI.removeControl(ui.Fsw2);
-    ESPUI.removeControl(ui.pmSet);
-    ESPUI.removeControl(ui.co2Set);
-
-    ESPUI.updateLabel(ui.UImode, String(data.mode));
-    ui.FAsw = ESPUI.addControl(Label, "Fresh Air", String(data.fresh), Alizarin, ui.eventTab);
-    ui.Fsw1 = ESPUI.addControl(Label, "Fan 1", String(data.f1), Alizarin, ui.eventTab);
-    ui.Fsw2 = ESPUI.addControl(Label, "Fan 2", String(data.f2), Alizarin, ui.eventTab);
-    widget.concat("{\"Mode\":");
-    widget.concat(method);
-    widget.concat(",\"Fresh Air\":");
-    widget.concat(data.fresh);
-    widget.concat(",\"Fan 1\":");
-    widget.concat(data.f1);
-    widget.concat(",\"Fan 2\":");
-    widget.concat(data.f2);
-    widget.concat("}");
-
-  }
-  ESPUI.updateControl(ui.UImode, -1);  // Refresh UI
-  
-  Serial.println(widget);
-  // Length (with one extra character for the null terminator)
-  int str_len = widget.length() + 1;
-  // Prepare the character array (the buffer)
-  char sw[str_len];
-  // Copy it over
-  widget.toCharArray(sw, str_len);
-
-  if (connectWifi){
-    
-    client.publish("v1/devices/me/telemetry", sw);
-  }else{
-    GSMmqtt.publish("v1/devices/me/telemetry", sw);
-  }
-
-  // esp_now_send(macArray, (uint8_t *) &sw, sizeof(sw));
-
-  // // Perform action based on method
-  // if (method == "setValue()") {
-  //   if (params) {
-  //     Serial.println("Turning ON the device!");
-  //     // Add your action here (e.g., digitalWrite to control hardware)
-  //   } else {
-  //     Serial.println("Turning OFF the device!");
-  //     // Add your action here
-  //   }
-  // }
-
-}
-
-int32_t getWiFiChannel(const char *ssid) {
-  if (int32_t n = WiFi.scanNetworks()) {
-      for (uint8_t i=0; i<n; i++) {
-          if (!strcmp(ssid, WiFi.SSID(i).c_str())) {
-              return WiFi.channel(i);
-          }
-      }
-  }
-  return 0;
-}
-
 bool WiFicheckForUpdate(String &firmware_url)
 {
   heartBeat();
@@ -1998,7 +2132,7 @@ bool WiFicheckForUpdate(String &firmware_url)
     if (new_version != current_version)
     {
       Serial.println("New version available. Updating...");
-      firmware_url = String("https://raw.githubusercontent.com/prakit340/GreenIO-OTA/main/ota/product/qualcomm/airmass25/firmware_v") + new_version + ".bin";
+      firmware_url = String("https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/firmware") + new_version + ".bin";
       Serial.println("Firmware URL: " + firmware_url);
       return true;
     }
@@ -2138,7 +2272,8 @@ void setup()
   delay(10);
   SerialMon.println("Wait...");
 
-  secure_layer.setCACert(root_ca);
+  // secure_layer.setCACert(root_ca);
+  secure_layer.setInsecure();
 
   tft.setTextColor(TFT_GREEN);
   tft.setTextDatum(MC_DATUM);
@@ -2274,6 +2409,7 @@ void setup()
 
     client.setServer(thingsboardServer, PORT);
     client.setCallback(callback);
+    Serial.println("After Call Back debug 1");
   }
   else
   {
@@ -2285,18 +2421,19 @@ void setup()
 
     GSMmqtt.setServer(thingsboardServer, PORT);
     GSMmqtt.setCallback(callback);
+    Serial.println("After Call Back debug 1");
   }
   delay(2000);
 
   tft.fillScreen(TFT_BLACK); // Clear screen
 
-  tft.fillRect(5, 240, tft.width() - 10, 5, tft.color24to16(0x82c442));   // Print the test text in the custom font
-  tft.fillRect(80, 240, tft.width() - 15, 5, tft.color24to16(0xfaf05d));  // Print the test text in the custom font
-  tft.fillRect(155, 240, tft.width() - 15, 5, tft.color24to16(0xed872d)); // Print the test text in the custom font
-  tft.fillRect(235, 240, tft.width() - 15, 5, tft.color24to16(0xeb3220)); // Print the test text in the custom font
-  tft.fillRect(315, 240, tft.width() - 15, 5, tft.color24to16(0x874596)); // Print the test text in the custom font
-  tft.fillRect(395, 240, tft.width() - 15, 5, tft.color24to16(0x74091e)); // Print the test text in the custom font
-  tft.fillRect(475, 240, tft.width() - 15, 5, TFT_BLACK);                 // Print the test text in the custom font
+  tft.fillRect(5, 250, tft.width() - 10, 5, tft.color24to16(0x82c442));   // Print the test text in the custom font
+  tft.fillRect(80, 250, tft.width() - 15, 5, tft.color24to16(0xfaf05d));  // Print the test text in the custom font
+  tft.fillRect(155, 250, tft.width() - 15, 5, tft.color24to16(0xed872d)); // Print the test text in the custom font
+  tft.fillRect(235, 250, tft.width() - 15, 5, tft.color24to16(0xeb3220)); // Print the test text in the custom font
+  tft.fillRect(315, 250, tft.width() - 15, 5, tft.color24to16(0x874596)); // Print the test text in the custom font
+  tft.fillRect(395, 250, tft.width() - 15, 5, tft.color24to16(0x74091e)); // Print the test text in the custom font
+  tft.fillRect(475, 250, tft.width() - 15, 5, TFT_BLACK);                 // Print the test text in the custom font
 
   t1CallGetProbe();
   t2CallShowEnv();
@@ -2324,9 +2461,11 @@ unsigned long currentTele = 0;
 
 void loop()
 {
+  // Serial.println("Loop1");
   // runner.execute();
   const unsigned long currentMillis = millis() / 1000;
   const unsigned long time2send = periodSendTelemetry;
+  const unsigned long time2OTA = periodOTA;
 
   if (connectWifi)
   {
@@ -2334,12 +2473,21 @@ void loop()
     {
       Serial.println("=== WiFi MQTT NOT CONNECTED ===");
       // Reconnect every 10 seconds
-      uint32_t t = millis();
-      if (t - lastReconnectAttempt > 10000L)
+      uint32_t t = millis() / 1000;
+      if (t - lastReconnectAttempt >= 30)
       {
         lastReconnectAttempt = t;
+
+        if (CountPing >= pingCount)
+        {
+          CountPing = 0;
+          ESP.restart();
+        }
+        CountPing++;
+
         if (reconnectWiFiMqtt())
         {
+          CountPing = 0;
           lastReconnectAttempt = 0;
         }
       }
@@ -2348,15 +2496,6 @@ void loop()
     }
 
     client.loop();
-
-    if ((currentMillis - previous_t5) >= 300)
-    {
-      previous_t5 = millis() / 1000;
-      // Project = "BMA";
-      // FirmwareVer = "0.0.1";
-      // OTA_git_CALL();
-      // GSM_OTA();
-      }
   }
   else
   {
@@ -2397,12 +2536,21 @@ void loop()
     {
       SerialMon.println("=== GSM MQTT NOT CONNECTED ===");
       // Reconnect every 10 seconds
-      uint32_t t = millis();
-      if (t - lastReconnectAttempt > 10000L)
+      uint32_t t = millis() / 1000;
+      if (t - lastReconnectAttempt >= 30)
       {
         lastReconnectAttempt = t;
+
+        if (CountPing >= pingCount)
+        {
+          CountPing = 0;
+          ESP.restart();
+        }
+        CountPing++;
+
         if (reconnectGSMMqtt())
         {
+          CountPing = 0;
           lastReconnectAttempt = 0;
         }
       }
@@ -2444,14 +2592,14 @@ void loop()
     sendNOW();
   }
 
-  // esp_err_t sub = esp_now_send(macArray, (uint8_t *) &sw, sizeof(sw));
-   
-  //  if (sub == ESP_OK) {
-  //    Serial.println("Sent with success");
-  //  }
-  //  else {
-  //    Serial.println("Error sending the data");
-  //    _initNOW();
-  //  }
+  if ((currentMillis - previous_t5) >= periodOTA)
+    {
+      previous_t5 = millis() / 1000;
+      if (connectWifi){
+        WiFi_OTA();
+      }else{
+        GSM_OTA();
+      }
+      }
 
 }
